@@ -57,6 +57,7 @@ impl Connections {
     self.connections.lock().unwrap().remove(&id);
   }
   fn broadcast(&self, buf: &[u8]) {
+    /* Loop over all connections in map and write the given buffer */
     for (id, conn) in self.connections.lock().unwrap().iter() {
       match conn.write(&buf) {
         Ok(size) => { debug!("[{}] Wrote {} to connection...", id, size); },
@@ -73,30 +74,41 @@ impl Connections {
 }
 
 fn handle_stream(conn: Conn) -> std::io::Result<()> {
+  /* Store the connection in the shared map */
   let id = conn.connections.store(conn.clone());
   println!("[{}] Connected...", id);
+  /* Start loop to read from socket */
   loop {
+    /* Close if there was an error */
     match conn.take_error() {
       Ok(_) => {},
       Err(_e) => {
         break;
       },
     }
+
+    /* Read from socket (buf size: 1024) */
     let mut buf = vec![0; 1024];
     match conn.read(&mut buf) {
+      /* If 0 bytes were read the socket has been closed */
       Ok(read) if read == 0 => {break;},
       Ok(_read) => {
+        /* Convert raw bytes to string */
         let string = String::from_utf8_lossy(&buf);
+        /* Prefix connection id to the message */
         let mut message = format!("[{}] ", id);
         message.push_str(&string);
+        /* Broadcast message to other sockets */
         conn.connections.broadcast(message.as_bytes());
       },
       Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+        /* Sleep for blocking error, an implementation of wait_for_fd would be better */
         thread::sleep(Duration::from_millis(10));
       },
       Err(_e) => {break},
     };
   }
+  /* After loop finishes remove from shared map */
   conn.connections.remove(id);
   println!("[{}] Disconnected...", id);
 
@@ -104,8 +116,9 @@ fn handle_stream(conn: Conn) -> std::io::Result<()> {
 }
 
 fn main() -> std::io::Result<()> {
-  let connections = Connections::new();
+  let connections = Connections::new(); /* Initialize struct containing all active connections */
 
+  /* Parse arguments */
   let args: Vec<String> = env::args().collect();
   let port = if args.len() > 1 {
     args[1].parse::<u16>().expect("Port must be a number")
@@ -118,22 +131,28 @@ fn main() -> std::io::Result<()> {
     IpAddr::from(Ipv4Addr::new(127,0,0,1))
   };
   
+  /* Create TCPListener */
   let socket_addr = SocketAddr::from((addr,port)); 
   let socket = TcpListener::bind(socket_addr)?;
   socket.set_nonblocking(true).expect("Unable to set non-blocking");
   println!("Listening on {}", socket_addr);
 
+  /* Accept connections in infinite loop */
   for stream in socket.incoming() {
     match stream {
       Ok(stream) => {
+        /* Set stream to non-blocking as read/write called from multiple threads */
         stream.set_nonblocking(true).expect("Unable to set non-blocking");
+        /* Store stream in Mutex for locking, and create struct to hold references */
         let conn = Conn { 
           stream: Arc::new(Mutex::new(stream)),
           connections: connections.clone(),
         };
+        /* Spawn the handler thread */
         thread::spawn(move || handle_stream(conn));
       },
       Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+        /* Sleep for a bit when blocking error, an implementation of wait_for_fd would be better */
         thread::sleep(Duration::from_millis(10));
         continue;
       },
